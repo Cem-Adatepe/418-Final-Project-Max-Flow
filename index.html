@@ -18,7 +18,7 @@
 <h2>Summary</h2>
 
 <p>
-We plan to implement high-performance parallel solutions to the maximum flow problem using the Edmonds--Karp and Dinic algorithms. Our goal is to explore and compare CPU parallelization with OpenMP and GPU acceleration with CUDA, measuring how each algorithm and platform scales on large synthetic and real-world graph instances (in comparison to a purely serial solution.)
+We plan to implement high-performance parallel solutions to the maximum flow problem using the Edmonds-Karp and Dinic algorithms. Our goal is to explore and compare CPU parallelization with OpenMP and GPU acceleration with CUDA, measuring how each algorithm and platform scales on large synthetic and real-world graph instances (in comparison to a purely serial solution.)
 </p>
 
 <h2>Background</h2>
@@ -28,7 +28,7 @@ The max flow problem is defined on a directed graph with a designated source and
 </p>
 
 <p>
-Edmonds--Karp is a specialization of the Ford--Fulkerson that uses BFS to repeatedly find the shortest (in edge count) augmenting path in the residual network. While this does yield a worst-case time complexity of $O(VE^2)$, in practice such an approach is simple and robust. Dinic's algorithm improves further improves on this by constructing a level graph with BFS and then finding a blocking flow by repeating DFS (or even more advanced blocking-flow routines,) achieving $O(V^2E)$ in general (and better bounds on some graph classes.)
+Edmonds-Karp is a specialization of the Ford-Fulkerson that uses BFS to repeatedly find the shortest (in edge count) augmenting path in the residual network. While this does yield a worst-case time complexity of $O(VE^2)$, in practice such an approach is simple and robust. Dinic's algorithm improves further improves on this by constructing a level graph with BFS and then finding a blocking flow by repeating DFS (or even more advanced blocking-flow routines,) achieving $O(V^2E)$ in general (and better bounds on some graph classes.)
 </p>
 
 <p>
@@ -57,7 +57,7 @@ While these two algorithms have regular high-level structures (i.e., repeated se
   </li>
 
   <li>
-    Understanding when Edmonds--Karp vs. Dinic and CPU vs. GPU are preferable requires well designed graphs for benchmarking and careful analysis of scalability (and the associated limits in synchronization, memory bandwidth, etc.)
+    Understanding when Edmonds-Karp vs. Dinic and CPU vs. GPU are preferable requires well designed graphs for benchmarking and careful analysis of scalability (and the associated limits in synchronization, memory bandwidth, etc.)
   </li>
 </ul>
 
@@ -66,7 +66,7 @@ While these two algorithms have regular high-level structures (i.e., repeated se
 <h3>Baseline Algorithms</h3>
 
 <ul>
-  <li>We will implement sequential Edmonds--Karp and Dinic in C++ as correctness-oriented baselines.</li>
+  <li>We will implement sequential Edmonds-Karp and Dinic in C++ as correctness-oriented baselines.</li>
   <li>We will validate implementations on small graphs with known solutions (e.g., textbook examples, online sources, hand-crafted cases) and cross-check the two algorithms against each other.</li>
 </ul>
 
@@ -135,7 +135,7 @@ We do not anticipate needing additional special resources beyond those normally 
   <li>
     <strong>Sequential implementations (Week 1)</strong>
     <ul>
-      <li>Implement and test (and check correctness of) sequential Edmonds--Karp and Dinic in C++.</li>
+      <li>Implement and test (and check correctness of) sequential Edmonds-Karp and Dinic in C++.</li>
       <li>Get baseline data.</li>
     </ul>
   </li>
@@ -143,7 +143,7 @@ We do not anticipate needing additional special resources beyond those normally 
   <li>
     <strong>OpenMP parallelization for CPU (Week 1-2)</strong>
     <ul>
-      <li>Implement parallel versions of Edmonds--Karp and Dinic using OpenMP, comparing the new parallel versions to the sequential versions for varying graph sizes and densities and CPUs.</li>
+      <li>Implement parallel versions of Edmonds-Karp and Dinic using OpenMP, comparing the new parallel versions to the sequential versions for varying graph sizes and densities and CPUs.</li>
       <li>Write milestone report on preliminary results from this OpenMP implementation vs sequential, as well as challenges (following course guidelines).</li>
     </ul>
   </li>
@@ -176,7 +176,7 @@ We do not anticipate needing additional special resources beyond those normally 
 <h3>Stretch Goals (Hope to Achieve)</h3>
 
 <ul>
-  <li>Implement both Edmonds--Karp and Dinic on the GPU and perform a detailed evaluation.</li>
+  <li>Implement both Edmonds-Karp and Dinic on the GPU and perform a detailed evaluation.</li>
   <li>Implement and evaluate more max flow algorithms following the same scheme (e.g., Push-Relabel, Pseudoflow).</li>
 </ul>
 
