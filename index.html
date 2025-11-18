@@ -1,33 +1,244 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Your Project Title</title>
-  <link rel="stylesheet" href="./styles.css">
+  <title>Project Proposal: Parallel Maximum Flow with Edmonds--Karp and Dinic Algorithms</title>
 </head>
 <body>
-  <header>
-    <h1>Project Heading</h1>
-    <p class="subtitle">Subtitle or brief description goes here.</p>
-  </header>
 
-  <main>
-    <section id="intro">
-      <h2>Introduction</h2>
-      <p>Replace this text with an overview of your project or page.</p>
-    </section>
+<h1>Project Proposal: Parallel Maximum Flow with Edmonds--Karp and Dinic Algorithms</h1>
 
-    <section id="content">
-      <h2>Content Section</h2>
-      <p>Add your main content here. You can include more sections as needed.</p>
-    </section>
-  </main>
+<p>
+  <strong>James Chen (jamesc3)</strong><br>
+  <strong>Cem Adatepe (cadatepe)</strong>
+</p>
 
-  <footer>
-    <p>&copy; 2023 Your Name or Organization</p>
-  </footer>
+<p><strong>Project URL:</strong> <a href="https://cem-adatepe.github.io/418-Final-Project-Max-Flow/">https://cem-adatepe.github.io/418-Final-Project-Max-Flow/</a></p>
 
-  <script src="./script.js"></script>
+<h2>Summary</h2>
+
+<p>
+We plan to implement high-performance parallel solutions to the maximum flow problem using the Edmonds--Karp and Dinic algorithms. Our goal is to explore and compare CPU parallelization with OpenMP and GPU acceleration with CUDA, measuring how each algorithm and platform scales on large synthetic and real-world graph instances (in comparison to a purely serial solution.)
+</p>
+
+<h2>Background</h2>
+
+<p>
+The max flow problem is defined on a directed graph with a designated source and sink and capacities on each edge. The task is to route as much flow as possible from source to sink while respecting capacity and flow conservation constraints. This problem is applicable to network routing, image segmentation, bipartite matching, and resource allocation.
+</p>
+
+<p>
+Edmonds--Karp is a specialization of the Ford--Fulkerson that uses BFS to repeatedly find the shortest (in edge count) augmenting path in the residual network. While this does yield a worst-case time complexity of $O(VE^2)$, in practice such an approach is simple and robust. Dinic's algorithm improves further improves on this by constructing a level graph with BFS and then finding a blocking flow by repeating DFS (or even more advanced blocking-flow routines,) achieving $O(V^2E)$ in general (and better bounds on some graph classes.)
+</p>
+
+<p>
+While these two algorithms have regular high-level structures (i.e., repeated searches on changing graphs), they do have irregular fine-grained behavior due to graph topology and changing residual capacities. We will start from sequential implementations on both, then design, implement, and evaluate parallel variants for both algorithms using both OpenMP and CUDA.
+</p>
+
+<h2>The Challenges</h2>
+
+<p>Parallelizing maximum flow introduces several non-trivial challenges:</p>
+
+<ul>
+  <li>
+    Both algorithms repeatedly perform graph traversals (e.g., BFS for level construction, DFS traversals for augmenting paths or blocking flows). On realistic graphs, vertex degrees and frontier sizes vary a lot, and so it's hard to balance work/load.
+  </li>
+
+  <li>
+    When many threads discover or update augmenting paths concurrently, they may attempt to modify the same residual edges or vertex excess values. To maintain correctness while minimizing sync overheads, we need good atomics, partitioned data structures, or some phase-based algorithms.
+  </li>
+
+  <li>
+    If graph adjacency lists (Max Flow is a graph problem) are naively stored in compressed formats, which can lead to scattered memory accesses. On CPUs this can hurt cache locality and on GPUs it hurts coalesced memory accessing and warp efficiency, so we must choose representations and traversal orders that work reasonably well on both architectures.
+  </li>
+
+  <li>
+    Dinic's blocking-flow phase is not trivially parallelizable as it has multiple augmenting paths which are discovered and saturated within a single level graph. Thus, designing a parallel blocking-flow routine that preserves correctness while also being parallel (e.g., disjoint path updates, edge-parallel pushes) is non-trivial.
+  </li>
+
+  <li>
+    Understanding when Edmonds--Karp vs. Dinic and CPU vs. GPU are preferable requires well designed graphs for benchmarking and careful analysis of scalability (and the associated limits in synchronization, memory bandwidth, etc.)
+  </li>
+</ul>
+
+<h2>Resources</h2>
+
+<h3>Baseline Algorithms</h3>
+
+<ul>
+  <li>We will implement sequential Edmonds--Karp and Dinic in C++ as correctness-oriented baselines.</li>
+  <li>We will validate implementations on small graphs with known solutions (e.g., textbook examples, online sources, hand-crafted cases) and cross-check the two algorithms against each other.</li>
+</ul>
+
+<h3>Literature + References</h3>
+
+<ul>
+  <li>Standard algorithm texts (e.g., CLRS) for formal definitions and complexity of maximum flow algorithms.</li>
+  <li>Research papers and technical reports on parallel max-flow for inspiration on data layouts and scheduling strategies.</li>
+  <li>Course materials (from say 15-451) for algorithm understanding.</li>
+</ul>
+
+<!--
+<h3>Development Environment</h3>
+
+<ul>
+  <li>We will use C++.</li>
+  <li>CPU parallelism: OpenMP.</li>
+  <li>GPU parallelism: CUDA.</li>
+</ul>
+-->
+
+<h2>Development and Platform Choice</h2>
+
+<p>We choose C++ with OpenMP and CUDA for the following reasons:</p>
+
+<ul>
+  <li>
+    C++ is a performant language which offers low-level control over system resources. This allows us to experiment with low level structure and do fine-grained optimization. It also allows us to use OpenMP and CUDA.
+  </li>
+  <li>
+    OpenMP is relatively lightweight and allows us to do CPU parallelism with C++. It's very straightforward to ablate and benchmark (say, different ways of parallelizing BFS and blocking-flow computations.)
+  </li>
+  <li>
+    CUDA is the standard choice for programming on NVIDIA GPUs and is supported by C++. It gives us fine-grained control over thread hierarchies and the memory space which allows us to optimize graph traversals (amongst other things.) There's also not much of a choice as we're working with NVIDIA GPUs as they're a course resource.
+  </li>
+</ul>
+
+<p>
+Using the same core language across CPU and GPU implementations simplifies code sharing (e.g., graph construction, input generation) while allowing us to directly compare architectural effects.
+</p>
+
+<h3>Hardware</h3>
+
+<ul>
+  <li>Multicore CPU machines from GHC machines.</li>
+  <li>GPUs from GHC machines.</li>
+</ul>
+
+<p>
+We do not anticipate needing additional special resources beyond those normally available for the course. We assume 4 weeks of time.
+</p>
+
+<h2>Goals and Deliverables</h2>
+
+<h3>Plan and Schedule</h3>
+
+<ol>
+  <li>
+    <strong>Experiment design (Week 1)</strong>
+    <ul>
+      <li>Sketch general ideas of the experiments and synthetic graphs we're going to evaluate our implementations on.</li>
+      <li>Generate initial synthetic graphs.</li>
+    </ul>
+  </li>
+
+  <li>
+    <strong>Sequential implementations (Week 1)</strong>
+    <ul>
+      <li>Implement and test (and check correctness of) sequential Edmonds--Karp and Dinic in C++.</li>
+      <li>Get baseline data.</li>
+    </ul>
+  </li>
+
+  <li>
+    <strong>OpenMP parallelization for CPU (Week 1-2)</strong>
+    <ul>
+      <li>Implement parallel versions of Edmonds--Karp and Dinic using OpenMP, comparing the new parallel versions to the sequential versions for varying graph sizes and densities and CPUs.</li>
+      <li>Write milestone report on preliminary results from this OpenMP implementation vs sequential, as well as challenges (following course guidelines).</li>
+    </ul>
+  </li>
+
+  <li>
+    <strong>CUDA parallelization for GPU (Week 2-3)</strong>
+    <ul>
+      <li>Depending on time (and if/how behind we are,) implement at least one of the two algorithms (but hopefully both) with CUDA.</li>
+      <li>Similarly benchmark this to the sequential version on CPU, as well as how the performance scales with threads/SMs, all on the same varied graphs.</li>
+    </ul>
+  </li>
+
+  <li>
+    <strong>Performance evaluation and analysis (Week 3-4)</strong>
+    <ul>
+      <li>Analyze potential scalability bottlenecks (synchronization hotspots, memory bandwidth, load imbalance.etc).</li>
+      <li>Potentially make final optimizations where needed.</li>
+    </ul>
+  </li>
+
+  <li>
+    <strong>Documentation and reporting (Week 3-4)</strong>
+    <ul>
+      <li>Final project report also as required by course guidelines.</li>
+      <li>Make poster session materials (including plots of performance, and potentially visualizations of the graphs the evaluations were run on.)</li>
+    </ul>
+  </li>
+</ol>
+
+<h3>Stretch Goals (Hope to Achieve)</h3>
+
+<ul>
+  <li>Implement both Edmonds--Karp and Dinic on the GPU and perform a detailed evaluation.</li>
+  <li>Implement and evaluate more max flow algorithms following the same scheme (e.g., Push-Relabel, Pseudoflow).</li>
+</ul>
+
+<p>If progress is slower than expected, our minimum deliverable will be:</p>
+
+<ol>
+  <li>Fully functional sequential implementations</li>
+  <li>An OpenMP implementation for both of the algorithms with quantitative results.</li>
+</ol>
+
+<!--
+<h2>Schedule</h2>
+
+<p>Assumes roughly four weeks.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Week</th>
+      <th>Milestone / Task Description</th>
+      <th>Responsible</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Week 1</td>
+      <td>Finalize input graph formats and generators, implement and test sequential Edmonds--Karp and Dinic, design initial experiment plan.</td>
+      <td>Both</td>
+    </tr>
+    <tr>
+      <td>Week 1--2</td>
+      <td>CPU parallelization with OpenMP and obtain preliminary results</td>
+      <td>Both</td>
+    </tr>
+    <tr>
+      <td>Week 2</td>
+      <td>Write milestone report summarizing current state, preliminary measurements on CPU, and updated schedule.</td>
+      <td>Both</td>
+    </tr>
+    <tr>
+      <td>Week 2--3</td>
+      <td>Write CUDA implementation</td>
+      <td>Both</td>
+    </tr>
+    <tr>
+      <td>Week 3</td>
+      <td>Optimization and scaling experiments: tune load balancing, memory access patterns, and synchronization on both OpenMP and CUDA versions, run experiments on larger graphs.</td>
+      <td>Both</td>
+    </tr>
+    <tr>
+      <td>Week 3--4</td>
+      <td>Finalize performance studies (CPU vs. GPU, Edmonds--Karp vs. Dinic), write final report.</td>
+      <td>Both</td>
+    </tr>
+    <tr>
+      <td>Final Week</td>
+      <td>Design and print poster.</td>
+      <td>Both</td>
+    </tr>
+  </tbody>
+</table>
+-->
+
 </body>
 </html>
