@@ -28,7 +28,7 @@ The max flow problem is defined on a directed graph with a designated source and
 </p>
 
 <p>
-Edmonds-Karp is a specialization of the Ford-Fulkerson that uses BFS to repeatedly find the shortest (in edge count) augmenting path in the residual network. While this does yield a worst-case time complexity of $O(VE^2)$, in practice such an approach is simple and robust. Dinic's algorithm improves further improves on this by constructing a level graph with BFS and then finding a blocking flow by repeating DFS (or even more advanced blocking-flow routines,) achieving $O(V^2E)$ in general (and better bounds on some graph classes.)
+Edmonds-Karp is a specialization of the Ford-Fulkerson that uses BFS to repeatedly find the shortest (in edge count) augmenting path in the residual network. While this does yield a worst-case time complexity of O(VE^2), in practice such an approach is simple and robust. Dinic's algorithm improves further improves on this by constructing a level graph with BFS and then finding a blocking flow by repeating DFS (or even more advanced blocking-flow routines,) achieving O(V^2E) in general (and better bounds on some graph classes.)
 </p>
 
 <p>
