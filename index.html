@@ -21,6 +21,69 @@
 We plan to implement high-performance parallel solutions to the maximum flow problem using the Edmonds-Karp and Dinic algorithms. Our goal is to explore and compare CPU parallelization with OpenMP and GPU acceleration with CUDA, measuring how each algorithm and platform scales on large synthetic and real-world graph instances (in comparison to a purely serial solution.)
 </p>
 
+<h2>Milestone Update (12/1/25)</h2>
+
+<p>This milestone report captures progress and updated plans for our 15-418 project.</p>
+
+<h3>Current Scope</h3>
+<ul>
+  <li>Algorithms under study: Edmonds-Karp, Dinic, and newly added Push-Relabel.</li>
+  <li>Implementations: sequential C++, OpenMP, and in-progress CUDA variants for each algorithm.</li>
+  <li>Evaluation dimensions: throughput/runtime, scaling vs. compute units, and sensitivity to graph structure (sparse vs. dense).</li>
+</ul>
+
+<h3>Progress</h3>
+<p><strong>General</strong></p>
+<ul>
+  <li>Built shared graph representation and max-flow interface with synthetic graph loading, generation, and benchmarking hooks.</li>
+  <li>Created a testing framework that runs all algorithms per instance and checks flow feasibility and absence of residual s-t paths.</li>
+  <li>Finished sequential baselines for all three algorithms and validated correctness; experiment design is complete.</li>
+</ul>
+<p><strong>OpenMP</strong></p>
+<ul>
+  <li>Designed parallelization strategies for BFS/DFS with careful parallel region placement to cut overhead.</li>
+  <li>Minimized false sharing and avoided critical regions; correctness verified against sequential baselines and residual checks.</li>
+</ul>
+<p><strong>Experiment Harness and Environment</strong></p>
+<ul>
+  <li>Benchmark driver accepts graph family/type, size parameters, and algorithm choice; runs multiple trials and logs timings.</li>
+</ul>
+<p><strong>CUDA</strong></p>
+<ul>
+  <li>CUDA versions of the algorithms are being implemented.</li>
+</ul>
+
+<h3>Status vs. Original Goals</h3>
+<ul>
+  <li>On track to produce all planned deliverables.</li>
+  <li>Initial OpenMP scaling challenges at high thread counts are mostly resolved.</li>
+  <li>Likely to ship CUDA versions for some or all algorithms (originally a “nice to have”).</li>
+</ul>
+
+<h3>Concerns</h3>
+<ul>
+  <li>OpenMP may still hit scaling limits at very high thread counts.</li>
+  <li>CUDA performance is not yet validated; integration risks remain.</li>
+</ul>
+
+<h3>Updated Goals</h3>
+<ul>
+  <li>Tune OpenMP versions and analyze results.</li>
+  <li>Get CUDA working well for at least one algorithm (preferably all) and analyze results.</li>
+  <li>Collect plots for density/density distribution/thread-count scaling behavior.</li>
+  <li>Write the final report.</li>
+</ul>
+
+<h3>Schedule</h3>
+<ul>
+  <li>First half of week of Dec 1: finish OpenMP and CUDA versions (James); run analysis (Cem).</li>
+  <li>Second half of week of Dec 1: write final report (both), covering runtime vs. size/density, speedup vs. thread count, degree distribution effects, and CPU vs. GPU comparisons on selected graph families.</li>
+  <li>No poster session or demo planned this semester.</li>
+</ul>
+
+<h3>Preliminary Results</h3>
+<p>We have not organized preliminary numerical results yet; plots will follow once CUDA runs are integrated.</p>
+
 <h2>Background</h2>
 
 <p>
