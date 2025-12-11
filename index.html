@@ -5,6 +5,860 @@
   <title>Project Proposal: Parallel Maximum Flow with Edmonds-Karp and Dinic Algorithms</title>
 </head>
 <body>
+<h1>Parallel Maximum Flow on CPU and GPU Architectures</h1>
+
+<p><strong>Team Members:</strong> James Chen (jamesc3), Cem Adatepe (cadatepe)</p>
+<p><strong>Date:</strong> December 10, 2025</p>
+
+<h2>Summary</h2>
+<p>
+We implement and evaluate parallel versions of classic maximum-flow solvers&mdash;Edmonds&ndash;Karp, Dinic, and Push&ndash;Relabel&mdash;on multicore CPUs via OpenMP and attempt GPU implementations via CUDA. The CUDA Push&ndash;Relabel path is correct, but there are correctness bugs in the CUDA Edmonds&ndash;Karp and Dinic variants in <code>src/algorithms_cuda.cu</code>, so we omit their speedups from our results and treat them as incomplete. The OpenMP algorithms are correct and are the focus of our performance evaluation on CPU.
+</p>
+
+<h2>Background</h2>
+
+<p>
+A flow network is a directed graph <code>G = (V, E)</code> with nonnegative edge capacities <code>c(u,v)</code>, a designated source <code>s &in; V</code>, and a sink <code>t &in; V</code>.
+A feasible flow assigns values <code>f(u,v)</code> to edges such that:
+(i) <code>0 &le; f(u,v) &le; c(u,v)</code> for all edges, and
+(ii) flow is conserved at all intermediate vertices.
+The maximum-flow problem seeks the flow of largest value leaving <code>s</code> (or equivalently entering <code>t</code>). Classical solutions revolve around two ideas:
+<em>augmenting paths</em> and <em>preflows</em>.
+</p>
+
+<p>
+All implementations consume <code>InputGraph</code> as a flat edge list with <code>n/s/t</code>, each backend builds its own residual/CSR (Compressed Sparse Row) structures (with reverse edges) internally.
+</p>
+
+<ul>
+  <li>
+    <strong>Inputs:</strong> node count, CSR-style edge lists, capacities, and designated <code>s</code> and <code>t</code> indices. Capacities are strictly nonnegative.
+  </li>
+  <li>
+    <strong>Outputs:</strong> the scalar max-flow value. Note that cert checks when enabled are recomputed on the fly, no per-edge flows are returned.
+  </li>
+  <li>
+    <strong>Residual graph:</strong> every edge <code>(u,v)</code> has a forward residual capacity <code>c(u,v) - f(u,v)</code> and a reverse residual capacity <code>f(u,v)</code>. This augmented structure enables undoing or redirecting flow.
+  </li>
+  <li>
+    <strong>Core operations:</strong>
+    <ul>
+      <li>BFS or DFS to find admissible edges or augmenting paths;</li>
+      <li>Residual relaxations (modifying forward/backward capacities) when pushing flow along an edge;</li>
+      <li>Bookkeeping involving parents, distance labels, or excess values depending on algorithm (Edmonds&ndash;Karp, Dinic, or Push&ndash;Relabel).</li>
+    </ul>
+  </li>
+</ul>
+
+<p>From a parallel perspective, max-flow exposes two very different kinds of opportunities:</p>
+
+<ul>
+  <li>
+    <strong>Frontier-parallel search.</strong>
+    BFS levels in Edmonds&ndash;Karp and Dinic contain many vertices whose outgoing edges can be scanned concurrently. This is amenable to both OpenMP and CUDA-type parallelizations.
+  </li>
+  <li>
+    <strong>Per-vertex concurrent discharge.</strong>
+    Push&ndash;Relabel converts the problem into a large collection of independent &ldquo;local&rdquo; updates to excess and height. Each active vertex may operate without global coordination (subject to atomic updates to shared capacities), which is very parallel-friendly.
+  </li>
+</ul>
+
+<p>
+However, the residual graph evolves dynamically, and the structure of augmenting paths can be highly irregular. This introduces notable load imbalance, synchronization, and memory-access challenges, which are especially challenging on GPUs where SIMT efficiency depends heavily on regular branching and dense memory access.
+</p>
+
+<h2>Related Work and Motivation</h2>
+
+<p>
+Classical maximum-flow algorithms include Edmonds&ndash;Karp (EK), Dinic&rsquo;s, and a family of preflow-based Push&ndash;Relabel (PR) methods. EK guarantees <code>O(VE^2)</code> time by fixing BFS-based shortest augmenting paths, while Dinic improves this to <code>O(V^2E)</code> in general and <code>O(&radic;V E)</code> for unit-capacity networks. Push&ndash;Relabel methods can achieve <code>O(V^3)</code> worst-case complexity but often outperform path-based methods in practice because they maintain localized updates and expose more parallel slack.
+</p>
+
+<h3>Parallel and High-Performance Max-Flow</h3>
+
+<p>
+The irregular structure of residual-graph traversal makes max-flow a canonical &ldquo;hard case&rdquo; for parallelization. Several strands of prior work have approached this challenge:
+</p>
+
+<ul>
+  <li>
+    <strong>Shared-memory parallelism.</strong>
+    Numerous studies have explored OpenMP parallel BFS, parallel level-graph construction, and multi-threaded Push&ndash;Relabel using atomic operations or partitioned ownership. The Push&ndash;Relabel family is known to parallelize more effectively because active vertices can discharge independently, and heuristics such as global relabeling and gap relabeling interact cleanly with thread-based execution.
+  </li>
+  <li>
+    <strong>GPU parallelism.</strong>
+    GPUs excel at frontier-style BFS due to predictable memory patterns, and indeed the literature contains substantial work on CUDA BFS kernels, distributed graph traversal, and SIMD-friendly queue operations. However, path-augmentation DFS in EK and Dinic suffers from highly irregular branching and synchronization patterns, reducing SIMT efficiency. GPU-friendly variants of Push&ndash;Relabel have been proposed, though achieving high utilization requires careful batching of pushes and message-passing schemes.
+  </li>
+</ul>
+
+<h3>Motivation</h3>
+
+<p>
+Modern multicore CPUs and GPUs offer significant raw parallelism, but max-flow remains challenging due to:
+</p>
+
+<ul>
+  <li>
+    <strong>Irregular control flow:</strong> augmenting paths and blocking flows depend on dynamic residual capacity, leading to poor branch predictability and divergent GPU warps.
+  </li>
+  <li>
+    <strong>Dynamic, sparse memory access:</strong> residual updates cause edges to be touched in an order dependent on runtime structure.
+  </li>
+  <li>
+    <strong>Synchronization pressure:</strong> atomic updates to capacities or excess potentially serialize many threads if not structured carefully.
+  </li>
+</ul>
+
+<p>
+We attempt OpenMP and CUDA implementations of algorithms for max flow, and the result is a systematic study of when and why different hardware platforms accelerate (or fail to accelerate) the core subroutines of the algorithms. During validation we found correctness issues in the CUDA Edmonds&ndash;Karp and Dinic paths, so those GPU variants are documented but not used in our quantitative results.
+</p>
+
+<h2>Workload and Parallelism Analysis: Where We Find Parallelism</h2>
+
+<p>
+Most of the runtime in our solvers comes from repeatedly traversing the residual graph and then mutating capacities and per-vertex state based on what those traversals discover. EK and Dinic build and exploit shortest-path structure, Push&ndash;Relabel pushes flow through many vertices more locally.
+</p>
+
+<h3>Augmenting Path Search</h3>
+
+<h4>Edmonds&ndash;Karp</h4>
+<p>
+The dominant cost is the BFS over the residual graph. On OpenMP we run each BFS level in parallel with an owner/message scheme: threads process their owned vertices, non-owners enqueue discovered vertices as messages, and messages are applied at the level barrier, giving level-synchronous expansion without per-edge locks. On CUDA we instead run a warp-centric BFS with a global device queue; each warp expands one frontier element at a time using atomics and warp ballots to enqueue newly visited vertices. After the BFS, a single-device kernel walks the parent pointers to augment the path.
+</p>
+
+<h4>Dinic (OpenMP)</h4>
+<p>
+On OpenMP we keep the BFS level build sequential (single-threaded) and parallelize only the blocking-flow phase by assigning different source-outgoing edges to different threads, each running its own serial DFS with vertex locks during augmentation. On CUDA, we build the level graph in parallel on the GPU, then compute blocking flow with a push/relabel-style kernel over the level graph (excess/height/cur arrays, atomics, and global relabels), rather than per-thread DFS stacks.
+</p>
+
+<h3>Flow Updates</h3>
+
+<h4>Edmonds&ndash;Karp</h4>
+<p>
+Edmonds&ndash;Karp computes the bottleneck on an augmenting path and then updates forward/reverse capacities along that path. In the OpenMP Edmonds&ndash;Karp implementation this augmentation is serialized in a <code>single</code> region. CUDA Edmonds&ndash;Karp performs the same two-pass update inside a single-device kernel once the BFS finds the sink.
+</p>
+
+<h4>Dinic</h4>
+<p>
+Dinic likewise computes a path bottleneck and then updates capacities along the path. OpenMP Dinic applies path updates under vertex locks along each path rooted at a source edge, while CUDA Dinic&rsquo;s blocking-flow phase uses push/relabel updates on the level graph with atomics rather than path-locked DFS.
+</p>
+
+<h4>Push&ndash;Relabel</h4>
+<p>
+In Push&ndash;Relabel, the OpenMP version partitions vertices across threads and batches cross-partition pushes as messages, with occasional global relabel. The CUDA version maintains a single global active queue (with epoch tags), runs push/relabel kernels over that queue, and triggers global relabels on the device. There is no vertex partitioning or per-partition inbox in CUDA.
+</p>
+
+<h3>Blocking Flow and Discharge Phases</h3>
+
+<h4>Edmonds&ndash;Karp</h4>
+<p>
+Each augmentation runs a single BFS from <code>s</code> to find the shortest residual path, then augments one path. Our OpenMP code parallelizes only the BFS (using owner-based work partitioning); the path augmentation is done by one thread. We do this because during profiling we discovered that BFS for EK was taking up to approximately 90% of the latency. Likewise on CUDA, the BFS is a warp-parallel frontier expansion, followed by a single-block augmentation kernel. Here EK offers parallelism in the search step but none in the augmentation, and it never accumulates a blocking flow the way Dinic does.
+</p>
+
+<h4>Dinic (OpenMP)</h4>
+<p>
+A single phase consists of a sequential BFS from <code>s</code> that builds a fresh level graph and then a sequence of DFS-style augmentations that run until the level graph becomes blocking. In our OpenMP code the BFS is not parallelized and the only parallelism comes from launching DFS searches in parallel over the outgoing edges of the source, with per-vertex locks guarding residual capacity updates. This helps when <code>deg(s)</code> is large, but each DFS path is still serial and the locking cost limits the available speedup.
+</p>
+
+<h4>Dinic (CUDA)</h4>
+<p>
+We still build the level graph with a frontier-style BFS from the source, but the blocking-flow phase is implemented as bulk push/relabel steps on that level graph. Kernels iterate over the current active set, push admissible flow, enqueue newly active vertices, and relabel stalled ones, with periodic global-relabel BFS from the sink to reset heights. This replaces an inherently serial DFS search with SIMT-friendly kernels that expose more parallelism on the level graph.
+</p>
+
+<h4>Push&ndash;Relabel</h4>
+<p>
+Push&ndash;Relabel proceeds in rounds where many vertices make progress at once. In OpenMP we partition the graph, then for each round: perform push-only discharges of active vertices within each partition, then apply cross-partition messages carrying excess, and finally relabel vertices that are still active, with occasional sink-rooted global relabels. Each step is a bulk parallel loop separated by barriers. The CUDA version follows the same structure with kernels: an active-queue push phase, a relabel phase for stalled vertices, and periodic global relabel BFS from the sink.
+</p>
+
+<p>
+Note that Push&ndash;Relabel spends most of its time in phases where the available work and parallelism scale with the number of active vertices, so both OpenMP and CUDA benefit from the bulk-synchronous structure. Our CPU Dinic, by contrast, is constrained by a sequential BFS and per-path locking during DFS, and so the GPU Dinic reformulation alleviates the serial DFS bottleneck but still depends on work found in a single source-rooted level graph per phase. These structural differences help explain why Push&ndash;Relabel shows larger speedups in our experiments.
+</p>
+
+<h2>Iteration Process and Implementation</h2>
+
+<p>
+Profiling sequential baselines establishes hotspots: BFS frontier expansion dominates EK and Dinic, while discharge loops dominate PR.
+</p>
+
+<h3>OpenMP</h3>
+
+<h4>Edmonds&ndash;Karp (parallel BFS)</h4>
+
+<p><strong>Initial attempt.</strong> The most direct parallelization target in Edmonds&ndash;Karp is the BFS that finds an augmenting path. Early versions of our OpenMP BFS started from a typical shared-queue pattern, but this quickly ran into either correctness problems (races when multiple threads discover the same vertex) or poor scaling (global locks / critical sections around the queue and visited array).</p>
+
+<p><strong>What we tried that did not work well.</strong></p>
+<ul>
+  <li><strong>Shared frontier with critical sections.</strong> Correct, but the BFS devolved into lock contention: many threads tried to push into the same next-frontier container and claim the same vertices.</li>
+  <li><strong>Fully parallel BFS at all levels.</strong> Even when correct, small early frontiers caused OpenMP overhead to dominate and performance regressed compared to sequential BFS on many instances.</li>
+  <li><strong>Per-edge early-stop checks.</strong> Frequent synchronized checks for &ldquo;sink found&rdquo; in the innermost adjacency loop increased memory traffic and reduced throughput.</li>
+</ul>
+
+<p><strong>Intermediate improvement.</strong> We moved to a level-synchronous BFS with per-thread next-frontier buffers and an atomic &ldquo;claim&rdquo; step for vertex discovery (using an epoch-stamped visited array). This removed global critical sections and fixed data races, but profiling showed the BFS still hit a scalability wall on graphs with high fan-in as many threads repeatedly contended on the same visited/epoch locations, turning the atomic CAS into a hotspot.</p>
+
+<p><strong>Final solution.</strong> The final BFS replaces fine-grained atomic discovery with an ownership plus message-passing design:</p>
+<ul>
+  <li>Each vertex is deterministically assigned to an owner thread.</li>
+  <li>The BFS proceeds in bulk-synchronous rounds: (1) threads expand their local frontier and emit discovery messages to the owning thread of each neighbor; (2) after a barrier, each owner thread applies messages and becomes the sole writer for its owned vertices&rsquo; visited/parent state.</li>
+  <li>We also added sequential seeding for the first few BFS levels when the frontier is tiny in order to avoid parallel overhead until enough work exists to amortize it.</li>
+  <li>The entire max-flow loop runs inside a persistent <code>#pragma omp parallel</code> region, avoiding repeated thread-team creation.</li>
+</ul>
+<p>
+The general intent of the final version is: instead of contending on atomics per discovered vertex, we pay a small number of barriers per BFS level and keep vertex state updates single-writer.
+</p>
+
+<h4>Dinic (parallel blocking flow with locks)</h4>
+
+<p><strong>Initial attempt.</strong> Dinic naturally separates into (i) BFS to build the level graph and (ii) repeated DFS-like augmentations to compute a blocking flow. Our first OpenMP version focused on parallelizing the BFS (level assignment), because it is relatively straightforward and can be implemented with atomic claims on <code>level[v]</code>.</p>
+
+<p><strong>What we tried that did not work well.</strong></p>
+<ul>
+  <li><strong>Parallel BFS only.</strong> This was correct and gave some speedup on instances where level construction was expensive, but overall gains were limited because the blocking-flow phase often dominated runtime.</li>
+  <li><strong>Parallelizing DFS with shared iterators.</strong> A direct attempt to run multiple DFS augmentations concurrently caused races on residual capacities and on per-vertex edge iterators; fixing these with atomics made the inner loop too expensive.</li>
+  <li><strong>Coarse-grained locks.</strong> Locking large regions of the graph (or a single global lock) made the algorithm correct but effectively sequential; overly fine-grained locking on edges increased overhead and risked deadlock if lock order was inconsistent.</li>
+</ul>
+
+<p><strong>Final solution.</strong> We reallocated parallel effort to the actual bottleneck of pushing flow in the level graph:</p>
+<ul>
+  <li>We use sequential BFS for simplicity and stability (building <code>level[]</code> once per phase is comparatively cheap and avoids atomics in level construction).</li>
+  <li>We implement parallel blocking-flow work decomposition by source edges: threads split the outgoing edges of the source, which provides a natural top-level partition of work.</li>
+  <li>We use per-vertex locks to protect updates to adjacency lists and residual capacities.</li>
+  <li>We use a two-phase augmentation: an optimistic path search that holds locks briefly while selecting candidate edges, followed by a locked commit step that locks all vertices on the path, revalidates the path (capacity/level), and then applies the augmentation.</li>
+</ul>
+<p>
+Locking vertices along a level-respecting path implicitly provides a consistent order (levels strictly increase), which prevents deadlock in practice. We also accumulate per-thread pushed flow into padded slots and sum once per phase, avoiding atomic additions in the hot loop. We stopped attempting to parallelize the easy BFS part and instead focused on a parallel augmentation mechanism (a DFS).
+</p>
+
+<h4>Push&ndash;Relabel</h4>
+
+<p><strong>Initial attempt.</strong> Push&ndash;Relabel is attractive for parallelism because many active vertices can be discharged independently. Our initial OpenMP design used a global active set processed in parallel, with correctness enforced via atomics. This scaled very poorly.</p>
+
+<p><strong>What we tried that did not work well.</strong></p>
+<ul>
+  <li><strong>More atomics.</strong> Every shared update made atomic fixed races, but the algorithm became dominated by cache-coherency traffic and atomic contention on hot vertices.</li>
+  <li><strong>Global active-set synchronization.</strong> Even with per-thread buffers, duplicates and frequent re-activation caused heavy contention around shared bookkeeping either directly or indirectly via atomics.</li>
+  <li><strong>Sequential global relabel.</strong> Although global relabel greatly reduces work, executing it sequentially became a large serial fraction once the rest of the algorithm was parallel.</li>
+</ul>
+
+<p><strong>How we arrived at the final solution.</strong></p>
+<ul>
+  <li>Each vertex is assigned to a partition (typically one partition per thread). The owner is the single writer for that vertex&rsquo;s <code>excess</code>, <code>height</code>, and active-status bookkeeping.</li>
+  <li>We use message passing for cross-partition pushes: when a push targets a vertex owned by another thread, we buffer a message containing the amount and the reverse-edge pointer. These messages are applied in a synchronized delivery phase, eliminating the need for atomic increments on remote <code>excess</code> and reverse capacities.</li>
+  <li>We perform push-only discharge first (using stable heights), then compute relabel candidates, then apply relabels and reactivate. This avoids interleaving relabel updates with concurrent pushes in a way that would otherwise require atomic height operations.</li>
+  <li>We redesigned global relabel as a frontier-based BFS from <code>t</code> using per-level barriers and atomic CAS only for discovery (claiming <code>height[u]</code>). This removes the major serial bottleneck while keeping the critical operation (first discovery) race-free.</li>
+  <li>We track &ldquo;touched destinations&rdquo; per thread so that message delivery does not degenerate into <code>P^2</code> scanning, and we use padded per-thread counters to avoid false sharing when detecting termination / triggering global relabel.</li>
+</ul>
+<p>
+In essence we replaced frequent fine-grained atomic updates with single-writer local updates and batched communication at barriers, while also parallelizing the remaining serial hotspot (the global relabel).
+</p>
+
+<h3>CUDA</h3>
+
+<p>
+The CUDA designs below capture what we implemented in <code>src/algorithms_cuda.cu</code>. Push&ndash;Relabel passes our certificate checks and is used in results, but the CUDA Edmonds&ndash;Karp and Dinic variants currently fail correctness checks, so their performance measurements are omitted even though we document the design decisions here.
+</p>
+
+<h4>Edmonds&ndash;Karp (warp-cooperative BFS + device augmentation)</h4>
+
+<p><strong>Initial attempt.</strong> Our first CUDA Edmonds&ndash;Karp offloaded only the BFS. We used a level-synchronous frontier expansion kernel with atomic claims on <code>parent[v]</code> and atomic appends to <code>next_frontier</code>. This was straightforward and correct, but the overall algorithm still behaved serially because augmentation (bottleneck computation and residual updates) ran on the CPU, and the BFS loop performed host-side checks and synchronizations at every level.</p>
+
+<p><strong>What we tried that did not work well.</strong></p>
+<ul>
+  <li><strong>Frontier-per-level BFS with host polling.</strong> Even though each expansion kernel was parallel, the BFS required many small kernel launches and frequent synchronization (copying frontier sizes / sink status back to the host). This overhead dominated on graphs with large diameters or small early frontiers.</li>
+  <li><strong>Full-array resets each BFS.</strong> Clearing with <code>cudaMemset</code> every BFS introduced an <code>O(n)</code> bandwidth cost independent of the explored subgraph, and competed directly with the BFS edge scans.</li>
+  <li><strong>Naive enqueue atomics.</strong> Appending newly discovered vertices with one <code>atomicAdd</code> per discovery created a contention hotspot on the queue tail when the frontier was large or the graph had high fan-in.</li>
+</ul>
+
+<p><strong>Intermediate improvement (reduce synchronization and resets).</strong> The first major fix was to stop treating &ldquo;unvisited&rdquo; as a value that must be reset globally. We moved to an epoch-stamped visited array where each BFS increments a <code>bfs_id</code> and treats <code>visited[v] == bfs_id</code> as &ldquo;visited in this BFS.&rdquo; This eliminated the per-iteration full reset and made the BFS cost proportional to the explored region.</p>
+
+<p><strong>Final solution.</strong> The final Edmonds&ndash;Karp design makes the BFS GPU-friendly as well as moves augmentation onto the device:</p>
+<ul>
+  <li>We implemented a queue-based, fused BFS kernel, so instead of launching one kernel per BFS level, a single kernel processes a global queue with atomic <code>head/tail</code> indices and an early-stop <code>found</code> flag. This removes the &ldquo;kernel-launch per level&rdquo; overhead.</li>
+  <li>Each warp cooperatively scans a vertex&rsquo;s adjacency list and uses warp ballot/popcount to reserve queue space once per warp, dramatically reducing global atomic contention compared to one-atomic-per-discovery.</li>
+  <li>A small GPU kernel walks the parent pointers, computes the bottleneck, and applies residual updates on the device. This eliminates CPU involvement in the hot max-flow loop and avoids unified-memory migration.</li>
+</ul>
+<p>
+In essence the control loop no longer synchronizes at every BFS layer, and the residual graph remains device-resident throughout the run. Again note that the current CUDA EK path still exhibits correctness issues, so this description is more for completeness than for analysis of a reported speedup.
+</p>
+
+<h4>Dinic (GPU level graph + worklist-based blocking flow)</h4>
+
+<p><strong>Initial attempt.</strong> Our first CUDA Dinic followed a common hybrid structure, where we have a GPU BFS to build <code>level[]</code>, then a CPU DFS to compute the blocking flow. This was correct and relatively easy to implement, but the DFS phase often dominated runtime and forced frequent CPU reads/writes to the residual graph, which slowed performance.</p>
+
+<p><strong>What we tried that did not work well.</strong></p>
+<ul>
+  <li><strong>Parallel BFS only.</strong> Level construction sped up, but overall gains were limited because blocking flow remained serial (and also performed irregular residual updates that are hard to accelerate).</li>
+  <li><strong>Fixed iteration caps.</strong> Bounding the number of GPU iterations per phase (to avoid long-running kernels) made the method brittle; some instances needed more iterations, while others wasted time after convergence.</li>
+</ul>
+
+<p><strong>Intermediate improvement (make blocking flow a conservation-respecting GPU problem).</strong> The key realization was that the DFS-style blocking flow is inherently serial, while a push&ndash;relabel style discharge process is parallelizable. We introduced explicit <code>excess[]</code>, <code>height[]</code>, and <code>cur[]</code> arrays on the GPU and switched from &ldquo;push from every vertex&rdquo; to &ldquo;push from active vertices with positive excess.&rdquo; We also replaced global resets with level stamping (<code>level_stamp[v] == bfs_tag</code>) to avoid clearing <code>level[]</code> each phase.</p>
+
+<p><strong>Final solution.</strong> The final CUDA Dinic computes each blocking flow using a GPU worklist engine on the level graph:</p>
+<ul>
+  <li>We make a stamped early stopping BFS where we build <code>level[]</code> with a frontier kernel that stamps reachability for the current <code>bfs_tag</code> and stops as soon as <code>t</code> is discovered.</li>
+  <li>We seed excess by saturating only source edges that enter level 1, ensuring subsequent pushes stay within the current level graph.</li>
+  <li>Each iteration consists of (i) a push phase over the active list (bounded work per vertex via a step limit), and (ii) a relabel phase for vertices that could not discharge. This avoids long, divergent per-thread loops and makes work proportional to the active set.</li>
+  <li>We use an epoch array so each vertex is enqueued at most once per iteration, preventing queue blow-up and reducing contention.</li>
+  <li>Residual consumption uses a compare-and-swap loop that atomically takes up to the desired amount, avoiding oversubscription and eliminating expensive revert paths.</li>
+  <li>To prevent thrashing due to stale heights, we periodically run a parallel relabeling BFS-like procedure and rebuild the active list, which significantly reduces relabel work and improves convergence.</li>
+</ul>
+<p>
+We stopped trying to parallelize DFS directly and instead reformulated blocking flow as a worklist-based, conservation-correct process that maps to CUDA execution. This CUDA Dinic path currently fails correctness checks and is excluded from performance analysis.
+</p>
+
+<h4>Push&ndash;Relabel (from CPU discharge to GPU worklists + global relabel)</h4>
+
+<p><strong>Initial attempt.</strong> The earliest CUDA Push&ndash;Relabel version only offloaded the preflow from the source, then performed discharge/relabel on the CPU using a host queue of active vertices. While correct, this left the dominant work (discharge scans and relabels) serial, and repeatedly touched residual state on the host.</p>
+
+<p><strong>What we tried that did not work well.</strong></p>
+<ul>
+  <li><strong>Keeping discharge on the CPU.</strong> Even with a fast GPU preflow, the CPU discharge loop dominated and became the bottleneck.</li>
+  <li><strong>One-thread-per-vertex discharge on the GPU.</strong> A direct port of discharge led to severe warp divergence (different degrees and different discharge lengths) and also correctness issues if we didn&rsquo;t use enough atomics.</li>
+  <li><strong>More atomics.</strong> Making <code>excess</code> and residual updates fully atomic fixed some races but scaling stalled due to contention on hot vertices and high atomic traffic.</li>
+  <li><strong>Uncontrolled device-side queues.</strong> Naively enqueuing every newly-active vertex produced many duplicates and risked queue overflow/OOM.</li>
+</ul>
+
+<p><strong>Intermediate improvement (GPU worklists + bounded work).</strong> We maintain an active queue of vertices with excess and process it in parallel. To keep kernels balanced, we imposed a fixed per-vertex step limit per launch and re-enqueued vertices that remained active. We also introduced an epoch marking scheme similar to previous algorithms to ensure vertices are enqueued at most once per round, eliminating duplicates.</p>
+
+<p><strong>Final solution.</strong></p>
+<ul>
+  <li>Each round processes <code>q</code> and produces <code>next_q</code>; an epoch-stamped <code>mark[]</code> prevents duplicate scheduling and reduces contention on <code>qsize</code>.</li>
+  <li>Vertices that exhaust their adjacency scan without discharging are placed into a relabel queue, and relabels are computed in parallel and the vertices are reactivated. This reduces divergence and avoids interleaving relabel decisions with concurrent pushes.</li>
+  <li>We periodically rebuild heights with a BFS from <code>t</code> using reverse residual edges, then rebuild the active list. This reduces wasted relabel work and becomes essential once the rest of the algorithm is parallel.</li>
+  <li>Capacity updates use CAS-based &ldquo;take&rdquo; operations so concurrent pushes cannot oversubscribe an edge.</li>
+</ul>
+<p>
+A full worklist-based formulation with de-duplication, bounded per-thread work, and global relabel gave us scalable performance.
+</p>
+
+<h2>Additional Code Details</h2>
+
+<h3>Codebase Structure</h3>
+<p>
+Graph parsing and dataset generation live in <code>src/graph.cpp</code> and <code>src/dataset.cpp</code>, while runner logic in <code>src/main.cpp</code> orchestrates benchmark modes (sequential, OpenMP, CUDA), argument parsing, and correctness checks. Algorithm interfaces are unified across backends via headers in <code>include/</code>, which provide a common entry point for each max-flow variant.
+</p>
+
+<h3>How to Run Experiments</h3>
+<p>To build the code, run <code>make</code> in the project root, which produces the <code>maxflow_experiments</code> binary. To generate benchmark graphs, run:</p>
+<blockquote><code>./maxflow_experiments generate graphs</code></blockquote>
+
+<p>
+On some machines, a few generated files may occasionally appear empty due to slow disk or process scheduling. If this persists and breaks testing, please contact us for pre-generated graphs as they do not fit onto Autolab. To run the full scaling experiment suite and write results to a CSV file (assuming the entire <code>graphs</code> directory has been generated), use:
+</p>
+<blockquote><code>./maxflow_experiments run_all_scaling graphs 1 --progress &gt; results.csv</code></blockquote>
+
+<h3>Sequential Implementations</h3>
+<p>
+We implement textbook versions of Edmonds&ndash;Karp, Dinic, and Push&ndash;Relabel in <code>src/algorithms_seq.cpp</code>. These serve both as correctness references and as baseline timings against which the OpenMP and CUDA implementations are compared.
+</p>
+
+<h3>Parallel Backends</h3>
+
+<p><strong>OpenMP back-end.</strong><br>
+The OpenMP implementations of Edmonds&ndash;Karp, Dinic, and Push&ndash;Relabel live in <code>src/algorithms_omp.cpp</code>. They share the same high-level interface as the sequential algorithms and can be selected via command-line flags to <code>maxflow_experiments</code>. All OpenMP runs accept a configurable thread count via <code>--threads</code>, which controls the size of the OpenMP thread team used in the hot loop.
+</p>
+
+<p><strong>CUDA back-end.</strong><br>
+CUDA kernels are implemented in <code>src/algorithms_cuda.cu</code> using compressed sparse row storage to enable coalesced neighbor scans. Prototype implementations exist for Edmonds&ndash;Karp and Dinic alongside the working Push&ndash;Relabel path, but the former two currently fail correctness checks and are excluded from reported CUDA results. Kernel launch configuration is controlled via the <code>--blocks</code> flag, which sets threads per block.
+</p>
+
+<h2>Experimental Setup</h2>
+
+<p>
+Our evaluation is built around a reproducible pipeline for synthetic graph generation, configurable experiment drivers for sequential, OpenMP, and CUDA algorithms, and consistent timing and correctness checks across all solvers. The structure of this pipeline closely follows the code in <code>dataset.cpp</code>, <code>graph.cpp</code>, <code>main.cpp</code>, and <code>runner.cpp</code>.
+</p>
+
+<h3>Datasets</h3>
+<p>
+We evaluate on a large suite of synthetic flow networks automatically generated via <code>generate_dataset</code>, which writes graph files into a user-specified directory. Following the configuration in <code>dataset.cpp</code>, we sweep three axes of variation:
+</p>
+
+<ul>
+  <li><strong>Graph size:</strong> <code>n &in; {2048, 8192, 32768}</code> nodes.</li>
+  <li><strong>Average out-degree:</strong> 8 or 16 random outgoing edges per vertex.</li>
+  <li>
+    <strong>Capacity distributions:</strong>
+    <ul>
+      <li><code>unit</code> &ndash; all capacities equal to 1,</li>
+      <li><code>small</code> &ndash; uniform in [1, 10],</li>
+      <li><code>wide</code> &ndash; powers of two up to <code>2^20</code>, clipped at <code>10^6</code>.</li>
+    </ul>
+  </li>
+</ul>
+
+<p>For each configuration triple <code>(n, avg_deg, cap_type)</code>, we generate:</p>
+<ol>
+  <li><strong>Erdős&ndash;Rényi-style graphs:</strong> directed graphs with a guaranteed <code>s</code>&ndash;<code>t</code> path formed by a random chain, then supplemented with random outgoing edges (<code>generate_random_erdos</code>).</li>
+  <li><strong>Layered DAGs:</strong> graphs composed of multiple layers of width <code>w &asymp; &radic;n</code>, with edges only between adjacent layers (<code>generate_layered</code>).</li>
+</ol>
+
+<p>
+For each Erdos instance, the generator first samples a random simple path from the source <code>s = 0</code> to the sink <code>t = n - 1</code> that visits roughly <code>n/10</code> distinct intermediate vertices, guaranteeing at least one reasonably long <code>s</code>&ndash;<code>t</code> path. It then iterates over all vertices <code>u</code> and, for each, adds <code>avg_deg</code> outgoing edges to uniformly random destinations <code>v &ne; u</code>, with capacities drawn from the chosen distribution. This process gives us a well-mixed directed graph whose average out-degree is directly controlled by <code>avg_deg</code> and that contains many alternative <code>s</code>&ndash;<code>t</code> routes in addition to the embedded long path.
+</p>
+
+<p>
+The layered construction instead forms a directed acyclic graph with <code>layers</code> levels, each of width <code>w</code>, plus a single global source and sink. The generator chooses <code>w &approx; &radic;n</code> and <code>layers &approx; n / w</code> so that the total number of internal vertices is on the order of <code>n</code>. The source connects to every vertex in the first layer, and every vertex in the last layer connects to the sink. Between consecutive layers L and L+1, the generator considers all <code>w &times; w</code> potential edges and includes roughly half of them according to a simple parity rule <code>(i + j + L) mod 2 = 0</code>, also assigning capacities from the chosen distribution. For layered graphs we also fix capacities on edges incident to <code>s</code> and <code>t</code> to the small distribution and only vary the capacity regime on internal edges, so that the different <code>cap_type</code> settings primarily affect the bulk of the network where the algorithms spend most of their time, rather than being dominated by trivial source/sink cuts.
+</p>
+
+<p>
+The Erdos graphs contain cycles and random &ldquo;shortcuts&rdquo; between arbitrary vertices, leading to relatively short typical <code>s</code>&ndash;<code>t</code> distances and highly irregular neighborhoods that resemble sparse expanders. Their augmenting paths can go through the graph in many qualitatively different ways. Layered DAGs enforce a strict level structure; all flow must move forward layer by layer from <code>s</code> to <code>t</code>, with no cycles or backward edges and path lengths on the order of the number of layers. This creates many parallel <code>s</code>&ndash;<code>t</code> paths with similar length and strong locality between consecutive layers. As a result, the Erdos instances emphasize irregular connectivity and random sparsity patterns, while the layered instances emphasize deep pipelines of parallel edges and are thus closer to worst-case patterns for blocking and push&ndash;relabel-style algorithms.
+</p>
+
+<p>
+Increasing <code>n</code> expands both the number of vertices and edges, increasing <code>avg_deg</code> densifies the Erdos graphs and raises the total edge count, and moving from <code>unit</code> to <code>wide</code> capacities introduces a more skewed capacity spectrum that stresses algorithms whose performance depends on capacity scales.
+</p>
+
+<p>
+All graphs share the convention that the source is vertex 0 and the sink is vertex <code>n - 1</code>. Files are written in a txt format, with the first line <code>n m s t</code>, followed by <code>m</code> lines of <code>u v capacity</code>. Graph I/O is handled by <code>load_graph</code> and <code>save_graph</code> in <code>graph.cpp</code>.
+</p>
+
+<h3>Execution Modes</h3>
+<p>
+Experiments are run using the unified driver <code>./maxflow_experiments</code> with the following modes, as defined in <code>main.cpp</code>:
+</p>
+
+<ul>
+  <li><strong>Sequential:</strong> <code>run_seq &lt;graph_dir&gt; [reps]</code>.</li>
+  <li><strong>OpenMP:</strong> <code>run_omp &lt;graph_dir&gt; [reps]</code> for fixed threads, and <code>run_omp_scaling &lt;graph_dir&gt; [reps]</code> to sweep multiple thread counts.</li>
+  <li><strong>CUDA:</strong> <code>run_cuda &lt;graph_dir&gt; [reps]</code> for fixed block size, and <code>run_cuda_scaling &lt;graph_dir&gt; [reps]</code> to sweep multiple block sizes.</li>
+</ul>
+
+<p>All modes support:</p>
+<ul>
+  <li><code>--check</code>: verify correctness against a reference sequential Dinic implementation.</li>
+  <li><code>--fail_fast</code>: abort immediately on flow mismatches.</li>
+  <li><code>--match SUBSTR</code>: restrict execution to graphs whose filenames contain the given substring.</li>
+  <li><code>--limit N</code>: cap the number of graphs processed, useful for large datasets.</li>
+  <li><code>--progress</code>: print per-graph timing summaries to stderr.</li>
+  <li><code>--no_summary</code>: disable the end-of-run aggregate summary.</li>
+</ul>
+
+<p>
+OpenMP scaling runs additionally accept <code>--threads T1,T2,...</code>, selecting thread counts for sweeping. CUDA scaling runs analogously accept <code>--blocks B1,B2,...</code>. Due to late-discovered correctness bugs, CUDA Edmonds&ndash;Karp and Dinic are not used in our experiments; CUDA runs and plots focus solely on Push&ndash;Relabel.
+</p>
+
+<h3>Metrics and Measurement</h3>
+
+<p>
+Timing and correctness infrastructure is implemented in <code>runner.cpp</code>. Each algorithm is run for a specified number of repetitions (default: three). For every repetition, we time only the execution of the max-flow algorithm:
+</p>
+
+<ul>
+  <li>Wall-clock time is measured using C++ <code>steady_clock</code>.</li>
+  <li>Repetitions are averaged to obtain a per-(graph, algo) mean runtime.</li>
+  <li>CSV rows of the form <code>graph_file, algo, [threads|block_size], flow_value, avg_ms</code> are streamed to <code>stdout</code> for later plotting.</li>
+</ul>
+
+<p>
+Correctness checks, when enabled, validate flow values against:
+</p>
+<ol>
+  <li>A reference sequential Dinic run performed once per graph (untimed), and</li>
+  <li>A min-cut certificate consistency check (<code>compute_flow_certificate</code>).</li>
+</ol>
+
+<p>
+For OpenMP, we compute per-algorithm speedups by comparing average runtime on a given thread count to the average single-threaded runtime, grouping results by the desired problem characteristic. We decided to compute speedups this way because we thought the most direct measure of parallel efficiency was to see how the approach scaled across multiple threads. This is more interpretable than comparing to a sequential baseline because we are isolating algorithmic differences and purely highlighting the speedup from parallelism.
+</p>
+
+<p>
+We also ablated GPU block sizes on GHC 41 and there was no major overall difference between reasonable block size choices, and so we fix the value at 256 for our experimental results. Note that there isn&rsquo;t a user-friendly interface to control how many SMs are used, as it&rsquo;s decided by the hardware scheduler, and as we only have one GPU available to us, our comparison with the GPU aims to compare the overall speedup on one GPU with OpenMP.
+</p>
+
+<h2>Results</h2>
+
+<p>
+Here we report and analyze the results of our parallel OpenMP algorithms and the CUDA Push&ndash;Relabel implementation, broken down by problem type/size and compute usage. CUDA Edmonds&ndash;Karp and Dinic results are omitted because recent correctness checks uncovered bugs in those kernels.
+</p>
+
+<h3>OpenMP Results</h3>
+
+<h4>Graph Size</h4>
+
+<p><img src="figures_final/fig1_size_vs_threads_dinic_omp.png" alt="Dinic OMP size vs threads" style="max-width:100%;"></p>
+
+<table>
+  <caption>Dinic OMP average runtime (ms) and speedup relative to single-thread by graph size and thread count</caption>
+  <thead>
+    <tr>
+      <th>Graph size (n)</th>
+      <th>T=1</th>
+      <th>T=2</th>
+      <th>T=4</th>
+      <th>T=8</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>2048</td>
+      <td>23.88 (1.00x)</td>
+      <td>11.48 (1.42x)</td>
+      <td>8.72 (1.72x)</td>
+      <td>7.29 (1.85x)</td>
+    </tr>
+    <tr>
+      <td>8192</td>
+      <td>233.95 (1.00x)</td>
+      <td>148.62 (1.36x)</td>
+      <td>119.42 (1.73x)</td>
+      <td>121.20 (1.77x)</td>
+    </tr>
+    <tr>
+      <td>32768</td>
+      <td>4001.47 (1.00x)</td>
+      <td>1897.14 (1.59x)</td>
+      <td>944.83 (2.27x)</td>
+      <td>751.33 (2.94x)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+For Dinic&rsquo;s algorithm, we observe modest speedups due to some inherent structural limitations of the implementation. As mentioned earlier, we had to resort to a sequential BFS due to poor empirical performance of the parallel version. So, every augmentation phase begins with a serial pass over all the reachable edges in the frontier. Only edges that leave the source (<code>#pragma omp for</code> over <code>g[s]</code>) are parallelized, and each thread walks its own blocking paths while holding per-vertex locks when searching and committing flow along a path. There are diminishing returns on the smaller node count graphs as the number of independent starting points for threads is limited, leading to more contention on locks for shared interior vertices. For the largest graphs, each BFS and blocking-flow phase touches many more vertices and edges, yielding more disjoint augmenting paths from the source, so the per-thread path-search work dominates and the fixed serial cost is better amortized.
+</p>
+
+<p><img src="figures_final/fig1_size_vs_threads_edmonds_karp_omp.png" alt="Edmonds-Karp OMP size vs threads" style="max-width:100%;"></p>
+
+<table>
+  <caption>Edmonds&ndash;Karp OMP average runtime (ms) and speedup relative to single-thread by graph size and thread count</caption>
+  <thead>
+    <tr>
+      <th>Graph size (n)</th>
+      <th>T=1</th>
+      <th>T=2</th>
+      <th>T=4</th>
+      <th>T=8</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>2048</td>
+      <td>25.98 (1.00x)</td>
+      <td>15.23 (1.47x)</td>
+      <td>9.98 (2.15x)</td>
+      <td>7.27 (2.80x)</td>
+    </tr>
+    <tr>
+      <td>8192</td>
+      <td>242.99 (1.00x)</td>
+      <td>134.08 (1.57x)</td>
+      <td>72.65 (2.54x)</td>
+      <td>58.14 (3.18x)</td>
+    </tr>
+    <tr>
+      <td>32768</td>
+      <td>2753.88 (1.00x)</td>
+      <td>1453.20 (1.71x)</td>
+      <td>730.51 (2.79x)</td>
+      <td>519.23 (3.79x)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+In contrast, we observe EK parallelizes the main bottleneck of the algorithm that Dinic&rsquo;s wasn&rsquo;t able to, which is the BFS itself. After some very small levels are processed sequentially, we switch to a fully parallel frontier-based BFS. Each vertex gets assigned to a thread that in some sense owns it, keeping a local frontier buffer, and the edges are relaxed by passing <code>Msg</code> structs to per-destination-thread outboxes. An augmentation along a single <code>s</code>&ndash;<code>t</code> path is performed in a single thread and is quite cheap in comparison to the BFS work. Importantly, the BFS frontiers quickly become large and well-balanced across threads, so we see that every level exposes a lot of independent work that needs relatively little synchronization at level boundaries, especially relative to Dinic&rsquo;s. This is why the speedup curves are much closer to ideal, and why we similarly observe better scaling on larger graphs.
+</p>
+
+<p><img src="figures_final/fig1_size_vs_threads_push_relabel_omp.png" alt="Push-Relabel OMP size vs threads" style="max-width:100%;"></p>
+
+<table>
+  <caption>Push&ndash;Relabel OMP average runtime (ms) and speedup relative to single-thread by graph size and thread count</caption>
+  <thead>
+    <tr>
+      <th>Graph size (n)</th>
+      <th>T=1</th>
+      <th>T=2</th>
+      <th>T=4</th>
+      <th>T=8</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>2048</td>
+      <td>2.79 (1.00x)</td>
+      <td>3.05 (0.98x)</td>
+      <td>3.37 (1.03x)</td>
+      <td>4.03 (0.99x)</td>
+    </tr>
+    <tr>
+      <td>8192</td>
+      <td>10.53 (1.00x)</td>
+      <td>11.88 (1.06x)</td>
+      <td>13.28 (1.11x)</td>
+      <td>19.30 (1.07x)</td>
+    </tr>
+    <tr>
+      <td>32768</td>
+      <td>3292.23 (1.00x)</td>
+      <td>1741.93 (1.30x)</td>
+      <td>919.55 (1.83x)</td>
+      <td>573.13 (2.55x)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+The Push&ndash;Relabel OMP code is more complex and markedly more communication-heavy, which is on display in the speedup pattern. There is virtually no speedup on the smaller graph sizes while there is noticeable, roughly linear speedup on the large graph. Each thread gets its own partition, and when flow is pushed to another vertex, it is delivered under <code>inbox_lock</code> to <code>incoming_sources</code> after a barrier. On top of this, the algorithm periodically performs a parallel global relabel. This is overkill for the small and medium graphs where partitioning overhead, communication, atomic updates on <code>height</code> and <code>excess</code>, and repeated barriers dominate cost. On the largest graphs, each partition holds many vertices and active nodes, so the discharge phase does significant local work between syncing points, and the relabel is a highly parallel operation. This amortizes away the fixed costs that dominated the smaller graphs, yielding roughly linear speedup (though still far from ideal due to the sheer amount of communication and barrier costs).
+</p>
+
+<h4>Graph Density</h4>
+
+<p><img src="figures_final/fig2_density_vs_threads_dinic_omp.png" alt="Dinic OMP density vs threads" style="max-width:100%;"></p>
+
+<table>
+  <caption>Dinic OMP average runtime (ms) and speedup relative to single-thread by graph density and thread count</caption>
+  <thead>
+    <tr>
+      <th>Degree (deg)</th>
+      <th>T=1</th>
+      <th>T=2</th>
+      <th>T=4</th>
+      <th>T=8</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>8</td>
+      <td>1578.64 (1.00x)</td>
+      <td>693.28 (1.68x)</td>
+      <td>414.28 (2.22x)</td>
+      <td>274.17 (3.11x)</td>
+    </tr>
+    <tr>
+      <td>16</td>
+      <td>6424.30 (1.00x)</td>
+      <td>3100.99 (1.50x)</td>
+      <td>1475.38 (2.32x)</td>
+      <td>1228.49 (2.77x)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+The average degree of the graph does not significantly impact the speedup of Dinic&rsquo;s. Increasing degree count makes the sequential part of the algorithm worse, because it has to inspect many more outgoing edges per vertex. On the other hand, extra edges do create more augmenting paths that can be parallelized, but for high thread count this leads to more lock contention, since the higher average degree means it&rsquo;s more likely for paths to share the same vertices/edges. This is why we likely see the less dense graph having better speedup relative to the single-thread OpenMP for 8 threads, although the difference is not substantial.
+</p>
+
+<p><img src="figures_final/fig2_density_vs_threads_edmonds_karp_omp.png" alt="Edmonds-Karp OMP density vs threads" style="max-width:100%;"></p>
+
+<table>
+  <caption>Edmonds&ndash;Karp OMP average runtime (ms) and speedup relative to single-thread by graph density and thread count</caption>
+  <thead>
+    <tr>
+      <th>Degree (deg)</th>
+      <th>T=1</th>
+      <th>T=2</th>
+      <th>T=4</th>
+      <th>T=8</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>8</td>
+      <td>1204.07 (1.00x)</td>
+      <td>689.87 (1.60x)</td>
+      <td>365.23 (2.62x)</td>
+      <td>251.48 (3.57x)</td>
+    </tr>
+    <tr>
+      <td>16</td>
+      <td>4303.69 (1.00x)</td>
+      <td>2216.52 (1.81x)</td>
+      <td>1095.80 (2.96x)</td>
+      <td>786.99 (4.01x)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+For EK, the relative speedup is actually greater on denser graphs, since our BFS is parallelized, which is where the extra edges show up. The key synchronization cost is nearly independent of degree, while the amount of work per level is roughly proportional to degree. Thus, the parallel edge scans of BFS take up a larger proportion of work compared to fixed coordination overhead, which is better amortized, giving better speedups on denser graphs.
+</p>
+
+<p><img src="figures_final/fig2_density_vs_threads_push_relabel_omp.png" alt="Push-Relabel OMP density vs threads" style="max-width:100%;"></p>
+
+<table>
+  <caption>Push&ndash;Relabel OMP average runtime (ms) and speedup relative to single-thread by graph density and thread count</caption>
+  <thead>
+    <tr>
+      <th>Degree (deg)</th>
+      <th>T=1</th>
+      <th>T=2</th>
+      <th>T=4</th>
+      <th>T=8</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>8</td>
+      <td>6441.37 (1.00x)</td>
+      <td>3391.90 (1.18x)</td>
+      <td>1767.75 (1.71x)</td>
+      <td>1073.25 (2.52x)</td>
+    </tr>
+    <tr>
+      <td>16</td>
+      <td>143.10 (1.00x)</td>
+      <td>91.95 (1.41x)</td>
+      <td>71.36 (1.94x)</td>
+      <td>73.01 (2.59x)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+For Push&ndash;Relabel, changing degree affects the amount of local work each thread does within its partition, and how many cross-partition messages are exchanged. When degree is increased, each vertex acquires more neighbors, so it has more admissible edges it can push along before having to be relabeled or going inactive. This raises overall work and message passing, but it also increases the amount of purely local push work that can be completed between synchronization points, improving thread utilization. The net effect is a slightly better speedup relative to a single thread on denser graphs.
+</p>
+
+<h4>Graph Topology</h4>
+
+<p><img src="figures_final/fig3_topology_vs_threads_dinic_omp.png" alt="Dinic OMP topology vs threads" style="max-width:100%;"></p>
+
+<table>
+  <caption>Dinic OMP average runtime (ms) and speedup relative to single-thread by graph topology and thread count</caption>
+  <thead>
+    <tr>
+      <th>Topology</th>
+      <th>T=1</th>
+      <th>T=2</th>
+      <th>T=4</th>
+      <th>T=8</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>erdos (n=32768)</td>
+      <td>4001.47 (1.00x)</td>
+      <td>1897.14 (1.59x)</td>
+      <td>944.83 (2.27x)</td>
+      <td>751.33 (2.94x)</td>
+    </tr>
+    <tr>
+      <td>layered (n=32763)</td>
+      <td>949.16 (1.00x)</td>
+      <td>636.72 (1.53x)</td>
+      <td>500.37 (1.98x)</td>
+      <td>394.38 (2.81x)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+For Dinic, both Erdos and layered graphs show similar speedup profiles. Erdos graphs likely experience slightly better relative speedups due to the fact that the parallel step in our Dinic algorithm occurs in the blocking-flow search. A random Erdos graph has many alternative <code>s</code>&ndash;<code>t</code> paths, and early levels in particular might have a sizable number of distinct edges that lead into disjoint regions of the graph, lending more independent work and fewer path conflicts. In layered graphs, augmenting paths share the same narrow spine of vertices and edges, which leads to slightly more stalling on bottleneck vertices. The level graph is also skinny, so per-phase work is somewhat less parallelizable, although these effects are modest.
+</p>
+
+<p><img src="figures_final/fig3_topology_vs_threads_edmonds_karp_omp.png" alt="Edmonds-Karp OMP topology vs threads" style="max-width:100%;"></p>
+
+<table>
+  <caption>Edmonds&ndash;Karp OMP average runtime (ms) and speedup relative to single-thread by graph topology and thread count</caption>
+  <thead>
+    <tr>
+      <th>Topology</th>
+      <th>T=1</th>
+      <th>T=2</th>
+      <th>T=4</th>
+      <th>T=8</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>erdos (n=32768)</td>
+      <td>2753.88 (1.00x)</td>
+      <td>1453.20 (1.71x)</td>
+      <td>730.51 (2.79x)</td>
+      <td>519.23 (3.79x)</td>
+    </tr>
+    <tr>
+      <td>layered (n=32763)</td>
+      <td>12221.83 (1.00x)</td>
+      <td>6696.90 (1.84x)</td>
+      <td>5159.68 (2.47x)</td>
+      <td>5136.71 (2.47x)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+Network topology has a much stronger effect on scaling for EK. Max speedup on 8 threads on Erdos graphs is nearly 3.8x, while layered graphs plateau at about 2.5x beyond 4 threads. On Erdos graphs, the BFS frontier is basically a large ball of vertices, and the middle layers of the graph are usually a large chunk. This lends itself nicely to parallelism, since each parallel BFS level then has thousands of edges to scan and work is pretty balanced across threads. On the other hand, the layered topology of a layered graph means frontiers are narrow (on the order of width), and there are many levels, so each level has less work per thread with the same fixed barriers and message-merging costs.
+</p>
+
+<p><img src="figures_final/fig3_topology_vs_threads_push_relabel_omp.png" alt="Push-Relabel OMP topology vs threads" style="max-width:100%;"></p>
+
+<table>
+  <caption>Push&ndash;Relabel OMP average runtime (ms) and speedup relative to single-thread by graph topology and thread count</caption>
+  <thead>
+    <tr>
+      <th>Topology</th>
+      <th>T=1</th>
+      <th>T=2</th>
+      <th>T=4</th>
+      <th>T=8</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>erdos (n=32768)</td>
+      <td>3292.23 (1.00x)</td>
+      <td>1741.93 (1.30x)</td>
+      <td>919.55 (1.83x)</td>
+      <td>573.13 (2.55x)</td>
+    </tr>
+    <tr>
+      <td>layered (n=32763)</td>
+      <td>164.91 (1.00x)</td>
+      <td>163.25 (1.00x)</td>
+      <td>151.72 (1.08x)</td>
+      <td>158.77 (1.05x)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+Push&ndash;Relabel sees an even sharper contrast. On Erdos graphs, active vertices tend to be scattered across the whole graph and across partitions, so each thread usually has a sufficient amount of active nodes to discharge locally between sync points, and we see healthy scaling with thread count. On layered graphs, for similar reasons to EK, the flow structure lies along a thin band of layers near the current cut; it&rsquo;s possible that only one or two threads do any meaningful work while other threads mostly participate in barriers and message handling. High fixed overhead combined with limited parallelism in the active region cancels out the benefits of increasing thread count, leading to an almost-flat speedup curve.
+</p>
+
+<h3>CUDA Results and Sequential Baseline</h3>
+
+<p>
+We discovered correctness bugs in the CUDA Edmonds&ndash;Karp and Dinic implementations after generating initial plots, so we discard their speedups and exclude them from analysis. The CUDA Push&ndash;Relabel kernel passes correctness checks, so we keep it as the sole GPU data point.
+</p>
+
+<table>
+  <caption>Average runtime (ms) for Push&ndash;Relabel across backends (OpenMP at 8 threads)</caption>
+  <thead>
+    <tr>
+      <th>Backend</th>
+      <th>seq</th>
+      <th>omp</th>
+      <th>cuda</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Push&ndash;Relabel</td>
+      <td>67707.37</td>
+      <td>130.45</td>
+      <td>1294.87</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+CUDA Push&ndash;Relabel cuts runtime dramatically relative to the sequential baseline by keeping the residual graph on device and running bulk discharge/relabel kernels, but it still lags the OpenMP version by roughly an order of magnitude. Push&ndash;Relabel is a poor fit for the GPU because it diverges the most from the SIMT model: nearly every useful operation is an atomic, some vertices do lots of pushes while others do none, and combined with the step limit this leads to warp divergence. As the algorithm begins to converge, the active queue size gets small, but we still launch grids for the worst case, leading to many idle warps. Hot vertices become contention points and the small, highly irregular active sets don&rsquo;t keep the GPU saturated, while kernel launches, atomics, and device-host control traffic dominate.
+</p>
+
+<h2>Work and Credit Distribution</h2>
+
+<ul>
+  <li><strong>James Chen</strong> (50%): sequential baselines, Edmonds&ndash;Karp/Dinic OpenMP/CUDA, benchmark automation.</li>
+  <li><strong>Cem Adatepe</strong> (50%): Push&ndash;Relabel OpenMP/CUDA kernels, dataset design and generation, results analysis and visualization.</li>
+</ul>
+
+<h2>References</h2>
+
+<ul>
+  <li><a href="https://www.cs.cmu.edu/~15451-f24/lectures/lecture12-flow2.pdf" target="_blank" rel="noopener noreferrer">https://www.cs.cmu.edu/~15451-f24/lectures/lecture12-flow2.pdf</a></li>
+  <li><a href="https://www.cs.cmu.edu/~15451-f24/lectures/lecture13-min-cost-flow.pdf" target="_blank" rel="noopener noreferrer">https://www.cs.cmu.edu/~15451-f24/lectures/lecture13-min-cost-flow.pdf</a></li>
+  <li><a href="https://cp-algorithms.com/graph/push-relabel.html" target="_blank" rel="noopener noreferrer">https://cp-algorithms.com/graph/push-relabel.html</a></li>
+  <li><a href="https://www.cs.cmu.edu/~guyb/papers/BBS15.pdf" target="_blank" rel="noopener noreferrer">https://www.cs.cmu.edu/~guyb/papers/BBS15.pdf</a></li>
+  <li><a href="http://impact.crhc.illinois.edu/shared/papers/effective2010.pdf" target="_blank" rel="noopener noreferrer">http://impact.crhc.illinois.edu/shared/papers/effective2010.pdf</a></li>
+</ul>
 
 <h1>Project Proposal: Parallel Maximum Flow with Edmonds-Karp and Dinic Algorithms</h1>
 
